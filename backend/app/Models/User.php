@@ -45,4 +45,9 @@ class User extends Authenticatable
             'password' => 'hashed',
         ];
     }
+
+    public function studySets()
+    {
+        return $this->hasMany(StudySet::class);
+    }
 }

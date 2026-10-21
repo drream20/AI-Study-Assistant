@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
   Activity, ArrowLeft, ArrowRight, Bell, BookOpen, Bookmark, CalendarDays,
   Check, CheckCircle2, ChevronRight, Clock3, Cloud, FileText, Filter,
@@ -8,17 +8,21 @@ import {
   Trash2, Trophy, Upload, X, Zap,
 } from 'lucide-vue-next'
 
+const API_BASE_URL = 'http://127.0.0.1:8000/api'
+
 type Tab = 'home' | 'library' | 'flashcards' | 'quizzes' | 'more'
 type Screen = Tab | 'details' | 'edit-set' | 'edit-question' | 'study' | 'quiz' | 'results' | 'progress' | 'activity' | 'settings'
 type CardStatus = 'known' | 'review' | 'new'
 
 interface Flashcard {
+  id?: string
   front: string
   back: string
   status: CardStatus
 }
 
 interface Question {
+  id?: string
   prompt: string
   options: string[]
   correct: number
@@ -32,6 +36,7 @@ interface StudySet {
   color: string
   updated: string
   favorite: boolean
+  persisted: boolean
   questions: Question[]
   cards: Flashcard[]
 }
@@ -57,15 +62,16 @@ const chosenAnswer = ref<number | null>(null)
 const editQuestionIndex = ref<number | null>(null)
 const questionDraft = ref<Question>({ prompt: '', options: ['', '', '', ''], correct: 0, explanation: '' })
 const setDraft = ref({ title: '', subject: '' })
+const isCreatingNewSet = ref(false)
 const toast = ref('')
 const fileInput = ref<HTMLInputElement | null>(null)
 const showDelete = ref(false)
 const remindersEnabled = ref(true)
 const shuffleEnabled = ref(false)
 
-const sets = ref<StudySet[]>([
+const fallbackSets: StudySet[] = [
   {
-    id: 'biology', title: 'Biology - Chapter 4', subject: 'Biology', color: 'mint', updated: 'Today, 10:24 AM', favorite: true,
+    id: 'biology', title: 'Biology - Chapter 4', subject: 'Biology', color: 'mint', updated: 'Today, 10:24 AM', favorite: true, persisted: false,
     questions: [
       { prompt: 'Which organelle is responsible for cellular respiration?', options: ['Chloroplast', 'Mitochondrion', 'Ribosome', 'Golgi apparatus'], correct: 1, explanation: 'Mitochondria convert energy from nutrients into ATP through cellular respiration.' },
       { prompt: 'What is the main function of chloroplasts in plant cells?', options: ['Store water', 'Carry out photosynthesis', 'Build proteins', 'Control cell division'], correct: 1, explanation: 'Chloroplasts use light energy to make sugars through photosynthesis.' },
@@ -78,7 +84,7 @@ const sets = ref<StudySet[]>([
     ],
   },
   {
-    id: 'computer', title: 'Computer Science Basics', subject: 'Computer Science', color: 'blue', updated: 'Yesterday, 4:32 PM', favorite: true,
+    id: 'computer', title: 'Computer Science Basics', subject: 'Computer Science', color: 'blue', updated: 'Yesterday, 4:32 PM', favorite: true, persisted: false,
     questions: [
       { prompt: 'What does CPU stand for?', options: ['Central Processing Unit', 'Computer Personal Utility', 'Core Program Upload', 'Central Power Unit'], correct: 0, explanation: 'The CPU executes instructions and coordinates many operations in a computer.' },
       { prompt: 'Which number system do computers use at the hardware level?', options: ['Decimal', 'Binary', 'Roman', 'Hexadecimal only'], correct: 1, explanation: 'Digital circuits represent information using two states, commonly represented as 0 and 1.' },
@@ -89,16 +95,18 @@ const sets = ref<StudySet[]>([
     ],
   },
   {
-    id: 'history', title: 'World History - Ancient Rome', subject: 'History', color: 'amber', updated: 'Apr 18, 2025', favorite: false,
+    id: 'history', title: 'World History - Ancient Rome', subject: 'History', color: 'amber', updated: 'Apr 18, 2025', favorite: false, persisted: false,
     questions: [{ prompt: 'Which body was central to political debate in the Roman Republic?', options: ['The Senate', 'The Imperial Court', 'The Ephors', 'The Areopagus'], correct: 0, explanation: 'The Senate was a powerful advisory body that shaped policy and public life.' }],
     cards: [{ front: 'What were the Twelve Tables?', back: 'The earliest written collection of Roman laws, published around 450 BCE.', status: 'new' }],
   },
   {
-    id: 'algebra', title: 'Mathematics - Algebra', subject: 'Mathematics', color: 'violet', updated: 'Apr 16, 2025', favorite: false,
+    id: 'algebra', title: 'Mathematics - Algebra', subject: 'Mathematics', color: 'violet', updated: 'Apr 16, 2025', favorite: false, persisted: false,
     questions: [{ prompt: 'Solve for x: 3x + 5 = 20', options: ['3', '5', '8', '15'], correct: 1, explanation: 'Subtract 5 from both sides, then divide by 3: x = 5.' }],
     cards: [{ front: 'What is the distributive property?', back: 'a(b + c) = ab + ac.', status: 'known' }],
   },
-])
+]
+
+const sets = ref<StudySet[]>(fallbackSets)
 
 const activity = ref<ActivityEntry[]>([
   { title: 'Biology - Chapter 4', detail: '12 questions · 8 flashcards', time: 'Today, 10:24 AM', kind: 'study' },
@@ -113,6 +121,138 @@ const navItems: { id: Tab; label: string; icon: typeof House }[] = [
   { id: 'quizzes', label: 'Quizzes', icon: ListChecks },
   { id: 'more', label: 'More', icon: MoreHorizontal },
 ]
+
+interface ApiStudySetResponse {
+  id: number | string
+  title: string
+  subject: string
+  description?: string | null
+  status?: string
+  source_type?: string
+  source_file_name?: string | null
+  is_favorite?: boolean
+  updated_at?: string
+  created_at?: string
+  questions?: Array<{
+    id?: number | string
+    prompt?: string
+    question_type?: string
+    difficulty?: string
+    explanation?: string | null
+    correct_answer?: string | null
+    options?: Array<{ id?: number | string; label?: string; value?: string; is_correct?: boolean }>
+  }>
+  flashcards?: Array<{
+    id?: number | string
+    front?: string
+    back?: string
+    review_status?: string
+    due_at?: string | null
+    interval_days?: number
+    review_count?: number
+    ease_factor?: number
+  }>
+}
+
+const getStudySetColor = (subject: string): string => {
+  const palette: Record<string, string> = {
+    biology: 'mint',
+    chemistry: 'blue',
+    history: 'amber',
+    mathematics: 'violet',
+    math: 'violet',
+    literature: 'pink',
+    computer: 'blue',
+    science: 'mint',
+    default: 'blue',
+  }
+
+  const key = subject.toLowerCase()
+  return palette[key] ?? palette.default
+}
+
+const formatUpdatedLabel = (value?: string): string => {
+  if (!value) return 'Today, just now'
+
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return 'Today, just now'
+
+  return parsed.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+const normalizeQuestion = (question: NonNullable<ApiStudySetResponse['questions']>[number], questionIndex: number): Question => {
+  const options = (question.options ?? []).map((option) => option.value ?? option.label ?? 'Option')
+  const correctIndex = (question.options ?? []).findIndex((option) => {
+    if (question.correct_answer == null) return false
+    return option.value === question.correct_answer || option.label === question.correct_answer
+  })
+
+  return {
+    ...(question.id === undefined ? {} : { id: String(question.id) }),
+    prompt: question.prompt ?? `Question ${questionIndex + 1}`,
+    options: options.length ? options : ['Option A', 'Option B', 'Option C', 'Option D'],
+    correct: correctIndex >= 0 ? correctIndex : 0,
+    explanation: question.explanation ?? 'No explanation provided yet.',
+  }
+}
+
+const normalizeStudySet = (item: ApiStudySetResponse): StudySet => {
+  const normalizedQuestions = (item.questions ?? []).map(normalizeQuestion)
+
+  const normalizedCards = (item.flashcards ?? []).map((card) => {
+    const reviewStatus = card.review_status ?? 'new'
+    const mappedStatus: CardStatus = reviewStatus === 'known' ? 'known' : reviewStatus === 'review' || reviewStatus === 'learning' ? 'review' : 'new'
+
+    return {
+      ...(card.id === undefined ? {} : { id: String(card.id) }),
+      front: card.front ?? 'Front side',
+      back: card.back ?? 'Back side',
+      status: mappedStatus,
+    }
+  })
+
+  return {
+    id: String(item.id),
+    title: item.title || 'Untitled study set',
+    subject: item.subject || 'General',
+    color: getStudySetColor(item.subject || 'General'),
+    updated: formatUpdatedLabel(item.updated_at ?? item.created_at),
+    favorite: Boolean(item.is_favorite),
+    persisted: true,
+    questions: normalizedQuestions,
+    cards: normalizedCards,
+  }
+}
+
+const loadStudySets = async () => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/study-sets`)
+    if (!response.ok) {
+      throw new Error(`Request failed with status ${response.status}`)
+    }
+
+    const payload = await response.json() as ApiStudySetResponse[]
+    if (Array.isArray(payload)) {
+      sets.value = payload.map(normalizeStudySet)
+      if (!selectedSetId.value || !sets.value.some((item) => item.id === selectedSetId.value)) {
+        selectedSetId.value = sets.value[0]?.id ?? ''
+      }
+    }
+  } catch (error) {
+    console.warn('Falling back to preview study data:', error)
+    sets.value = fallbackSets
+  }
+}
+
+onMounted(() => {
+  loadStudySets()
+})
 
 const currentSet = computed(() => sets.value.find((item) => item.id === selectedSetId.value) ?? null)
 const currentCard = computed(() => currentSet.value?.cards[cardIndex.value] ?? null)
@@ -150,28 +290,100 @@ function openSet(id: string) {
 }
 
 function createSet() {
-  const id = `set-${Date.now()}`
-  const created: StudySet = { id, title: 'New study set', subject: 'General', color: 'blue', updated: 'Today, just now', favorite: false, questions: [], cards: [] }
-  sets.value.unshift(created)
-  selectedSetId.value = id
-  setDraft.value = { title: created.title, subject: created.subject }
+  isCreatingNewSet.value = true
+  setDraft.value = { title: '', subject: '' }
+  selectedSetId.value = ''
   screen.value = 'edit-set'
 }
 
 function editSet() {
   if (!currentSet.value) return
+  if (!currentSet.value.persisted) return notify('Preview study sets cannot be edited on the backend.')
+  isCreatingNewSet.value = false
   setDraft.value = { title: currentSet.value.title, subject: currentSet.value.subject }
   screen.value = 'edit-set'
 }
 
-function saveSet() {
-  if (!currentSet.value || !setDraft.value.title.trim()) return notify('Add a title before saving.')
-  currentSet.value.title = setDraft.value.title.trim()
-  currentSet.value.subject = setDraft.value.subject.trim() || 'General'
-  currentSet.value.updated = 'Today, just now'
-  logActivity('Study set edited', currentSet.value.title, 'edit')
-  screen.value = 'details'
-  notify('Updated in this preview. Local saving is not connected yet.')
+async function saveSet() {
+  const title = setDraft.value.title.trim()
+  const subject = setDraft.value.subject.trim() || 'General'
+
+  if (!title) return notify('Add a title before saving.')
+
+  if (isCreatingNewSet.value) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/study-sets`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          user_id: 1,
+          title,
+          subject,
+          description: 'Created from the mobile app.',
+          status: 'draft',
+          source_type: 'manual',
+          is_favorite: false,
+        }),
+      })
+
+      const payload = await response.json().catch(() => null)
+
+      if (!response.ok) {
+        const errors = payload?.errors && typeof payload.errors === 'object'
+          ? Object.values(payload.errors).flat().join(' ')
+          : payload?.message || 'The study set could not be created.'
+        throw new Error(errors)
+      }
+
+      const created = normalizeStudySet(payload as ApiStudySetResponse)
+      sets.value = [created, ...sets.value]
+      selectedSetId.value = created.id
+      isCreatingNewSet.value = false
+      logActivity('Study set created', created.title, 'create')
+      screen.value = 'details'
+      notify('Study set saved to the backend.')
+      return
+    } catch (error) {
+      console.error('Failed to create study set:', error)
+      notify(error instanceof Error ? error.message : 'Unable to create this study set.')
+      return
+    }
+  }
+
+  if (!currentSet.value) return
+  if (!currentSet.value.persisted) return notify('Preview study sets cannot be edited on the backend.')
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/study-sets/${currentSet.value.id}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ title, subject }),
+    })
+    const payload = await response.json().catch(() => null)
+
+    if (!response.ok) {
+      const errors = payload?.errors && typeof payload.errors === 'object'
+        ? Object.values(payload.errors).flat().join(' ')
+        : payload?.message || 'The study set could not be updated.'
+      throw new Error(errors)
+    }
+
+    currentSet.value.title = payload?.title ?? title
+    currentSet.value.subject = payload?.subject ?? subject
+    currentSet.value.updated = formatUpdatedLabel(payload?.updated_at)
+    logActivity('Study set edited', currentSet.value.title, 'edit')
+    screen.value = 'details'
+    notify('Study set updated on the backend.')
+  } catch (error) {
+    console.error('Failed to update study set:', error)
+    notify(error instanceof Error ? error.message : 'Unable to update this study set.')
+  }
 }
 
 function toggleFavorite(item: StudySet) {
@@ -179,15 +391,36 @@ function toggleFavorite(item: StudySet) {
   logActivity(item.favorite ? 'Added to Favorites' : 'Removed from Favorites', item.title, 'edit')
 }
 
-function deleteSet() {
+async function deleteSet() {
   if (!currentSet.value) return
+  if (!currentSet.value.persisted) {
+    showDelete.value = false
+    return notify('Preview study sets cannot be deleted from the backend.')
+  }
+
   const title = currentSet.value.title
-  sets.value = sets.value.filter((item) => item.id !== selectedSetId.value)
-  logActivity('Study set deleted', title, 'delete')
-  screen.value = 'library'
-  activeTab.value = 'library'
-  showDelete.value = false
-  notify('Removed from this preview.')
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/study-sets/${selectedSetId.value}`, {
+      method: 'DELETE',
+      headers: { Accept: 'application/json' },
+    })
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null)
+      throw new Error(payload?.message || 'The study set could not be deleted.')
+    }
+
+    sets.value = sets.value.filter((item) => item.id !== selectedSetId.value)
+    logActivity('Study set deleted', title, 'delete')
+    screen.value = 'library'
+    activeTab.value = 'library'
+    showDelete.value = false
+    notify('Study set deleted from the backend.')
+  } catch (error) {
+    console.error('Failed to delete study set:', error)
+    notify(error instanceof Error ? error.message : 'Unable to delete this study set.')
+  }
 }
 
 function duplicateSet() {
@@ -210,8 +443,31 @@ function startStudy(id = selectedSetId.value) {
   screen.value = 'study'
 }
 
-function gradeCard(status: CardStatus) {
+async function gradeCard(status: CardStatus) {
   if (!currentCard.value || !currentSet.value) return
+
+  if (currentSet.value.persisted && currentCard.value.id) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/study-set-flashcards/${currentCard.value.id}/review`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ status }),
+      })
+      const payload = await response.json().catch(() => null)
+
+      if (!response.ok) {
+        throw new Error(payload?.message || 'The flashcard review could not be saved.')
+      }
+    } catch (error) {
+      console.error('Failed to save flashcard review:', error)
+      notify(error instanceof Error ? error.message : 'Unable to save this flashcard review.')
+      return
+    }
+  }
+
   currentCard.value.status = status
   if (cardIndex.value < currentSet.value.cards.length - 1) {
     cardIndex.value += 1
@@ -264,15 +520,101 @@ function editQuestion(index: number | null = null) {
   screen.value = 'edit-question'
 }
 
-function saveQuestion() {
+async function deleteQuestion() {
+  if (!currentSet.value || editQuestionIndex.value === null) return
+  const question = currentSet.value.questions[editQuestionIndex.value]
+  if (!question || !window.confirm('Delete this question?')) return
+
+  if (currentSet.value.persisted) {
+    if (!question.id) return notify('This question is missing its backend ID and cannot be deleted.')
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/study-sets/${currentSet.value.id}/questions/${question.id}`, {
+        method: 'DELETE',
+        headers: { Accept: 'application/json' },
+      })
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.message || 'The question could not be deleted.')
+      }
+    } catch (error) {
+      console.error('Failed to delete question:', error)
+      notify(error instanceof Error ? error.message : 'Unable to delete this question.')
+      return
+    }
+  }
+
+  currentSet.value.questions.splice(editQuestionIndex.value, 1)
+  logActivity('Question deleted', currentSet.value.title, 'delete')
+  screen.value = 'details'
+  detailTab.value = 'Questions'
+  notify(currentSet.value.persisted ? 'Question deleted from the backend.' : 'Question deleted from this preview.')
+}
+
+async function saveQuestion() {
   if (!currentSet.value || !questionDraft.value.prompt.trim()) return notify('Add a question before saving.')
-  const question = { ...questionDraft.value, prompt: questionDraft.value.prompt.trim(), options: questionDraft.value.options.map((option) => option.trim()).filter(Boolean) }
-  if (editQuestionIndex.value === null) currentSet.value.questions.push(question)
-  else currentSet.value.questions.splice(editQuestionIndex.value, 1, question)
+  const options = questionDraft.value.options.map((option) => option.trim()).filter(Boolean)
+  if (options.length < 2) return notify('Add at least two answer options.')
+
+  const correct = options.indexOf(questionDraft.value.options[questionDraft.value.correct]?.trim() ?? '')
+  if (correct < 0) return notify('Choose a correct answer before saving.')
+
+  const questionPayload = {
+    prompt: questionDraft.value.prompt.trim(),
+    options,
+    correct,
+    explanation: questionDraft.value.explanation.trim() || null,
+  }
+  const existing = editQuestionIndex.value === null
+    ? null
+    : currentSet.value.questions[editQuestionIndex.value]
+
+  if (currentSet.value.persisted) {
+    const url = existing?.id
+      ? `${API_BASE_URL}/study-sets/${currentSet.value.id}/questions/${existing.id}`
+      : `${API_BASE_URL}/study-sets/${currentSet.value.id}/questions`
+
+    try {
+      const response = await fetch(url, {
+        method: existing?.id ? 'PATCH' : 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(questionPayload),
+      })
+      const payload = await response.json().catch(() => null)
+
+      if (!response.ok) {
+        const errors = payload?.errors && typeof payload.errors === 'object'
+          ? Object.values(payload.errors).flat().join(' ')
+          : payload?.message || 'The question could not be saved.'
+        throw new Error(errors)
+      }
+
+      const savedQuestion = normalizeQuestion(payload, editQuestionIndex.value ?? currentSet.value.questions.length)
+      if (editQuestionIndex.value === null) currentSet.value.questions.push(savedQuestion)
+      else currentSet.value.questions.splice(editQuestionIndex.value, 1, savedQuestion)
+    } catch (error) {
+      console.error('Failed to save question:', error)
+      notify(error instanceof Error ? error.message : 'Unable to save this question.')
+      return
+    }
+  } else {
+    const question: Question = {
+      ...(existing?.id ? { id: existing.id } : {}),
+      ...questionPayload,
+      explanation: questionPayload.explanation ?? '',
+    }
+    if (editQuestionIndex.value === null) currentSet.value.questions.push(question)
+    else currentSet.value.questions.splice(editQuestionIndex.value, 1, question)
+  }
+
   logActivity(editQuestionIndex.value === null ? 'Question added' : 'Question edited', currentSet.value.title, 'edit')
   screen.value = 'details'
   detailTab.value = 'Questions'
-  notify('Question updated in this preview.')
+  notify(currentSet.value.persisted ? 'Question saved to the backend.' : 'Question updated in this preview.')
 }
 
 function pickUpload() {
@@ -335,7 +677,7 @@ function fileSelected(event: Event) {
 
       <section v-else-if="screen === 'edit-set'" class="page editor-page"><button class="back-link" type="button" @click="screen = currentSet ? 'details' : 'library'"><ArrowLeft :size="16" /> Cancel</button><p class="eyebrow">YOUR STUDY MATERIAL</p><h1>{{ currentSet?.title === 'New study set' ? 'Create study set' : 'Edit study set' }}</h1><label class="field-label">Study set title<input v-model="setDraft.title" maxlength="80" placeholder="e.g. Biology Chapter 4" /></label><label class="field-label">Subject<input v-model="setDraft.subject" maxlength="40" placeholder="e.g. Biology" /></label><p class="info-callout"><Sparkles :size="16" /> Questions and flashcards can be added after the set is created.</p><button class="button button-primary full-button" type="button" @click="saveSet"><Check :size="16" /> Save changes</button></section>
 
-      <section v-else-if="screen === 'edit-question' && currentSet" class="page editor-page"><button class="back-link" type="button" @click="screen = 'details'; detailTab = 'Questions'"><ArrowLeft :size="16" /> Questions</button><p class="eyebrow">STUDY SET EDITOR</p><h1>Edit Question</h1><label class="field-label">Question type<select><option>Multiple Choice</option><option>Identification</option><option>Enumeration</option></select></label><label class="field-label">Question<textarea v-model="questionDraft.prompt" rows="3" placeholder="Write your question"></textarea></label><div class="field-label">Options <small>Tap the letter to mark the correct answer.</small></div><div v-for="(option, index) in questionDraft.options" :key="index" class="option-row"><button type="button" :class="{ correct: questionDraft.correct === index }" @click="questionDraft.correct = index">{{ String.fromCharCode(65 + index) }}</button><input v-model="questionDraft.options[index]" :aria-label="`Answer option ${index + 1}`" :placeholder="option || `Option ${index + 1}`" /></div><button class="text-button add-option" type="button" @click="questionDraft.options.push('')"><Plus :size="15" /> Add option</button><label class="field-label">Explanation <small>Optional</small><textarea v-model="questionDraft.explanation" rows="3" placeholder="Explain the correct answer"></textarea></label><button class="button button-primary full-button" type="button" @click="saveQuestion"><Check :size="16" /> Save question</button></section>
+      <section v-else-if="screen === 'edit-question' && currentSet" class="page editor-page"><button class="back-link" type="button" @click="screen = 'details'; detailTab = 'Questions'"><ArrowLeft :size="16" /> Questions</button><p class="eyebrow">STUDY SET EDITOR</p><h1>Edit Question</h1><label class="field-label">Question type<select><option>Multiple Choice</option><option>Identification</option><option>Enumeration</option></select></label><label class="field-label">Question<textarea v-model="questionDraft.prompt" rows="3" placeholder="Write your question"></textarea></label><div class="field-label">Options <small>Tap the letter to mark the correct answer.</small></div><div v-for="(option, index) in questionDraft.options" :key="index" class="option-row"><button type="button" :class="{ correct: questionDraft.correct === index }" @click="questionDraft.correct = index">{{ String.fromCharCode(65 + index) }}</button><input v-model="questionDraft.options[index]" :aria-label="`Answer option ${index + 1}`" :placeholder="option || `Option ${index + 1}`" /></div><button class="text-button add-option" type="button" @click="questionDraft.options.push('')"><Plus :size="15" /> Add option</button><label class="field-label">Explanation <small>Optional</small><textarea v-model="questionDraft.explanation" rows="3" placeholder="Explain the correct answer"></textarea></label><button class="button button-primary full-button" type="button" @click="saveQuestion"><Check :size="16" /> Save question</button><button v-if="editQuestionIndex !== null" class="button button-danger full-button" type="button" @click="deleteQuestion"><Trash2 :size="16" /> Delete question</button></section>
 
       <section v-else-if="screen === 'flashcards'" class="page"><div class="page-heading"><div><p class="eyebrow">ACTIVE RECALL</p><h1>Flashcards</h1><p class="muted">{{ dueCards }} cards ready for review.</p></div><span class="round-icon cards-icon"><BookOpen :size="21" /></span></div><div class="due-banner"><Clock3 :size="19" /><span><strong>{{ dueCards }} cards due today</strong><small>Review a few cards to keep them fresh.</small></span><ChevronRight :size="16" /></div><div class="section-heading deck-heading"><div><p class="eyebrow">YOUR DECKS</p><h2>Choose a study set</h2></div><button class="text-button" type="button" @click="shuffleEnabled = !shuffleEnabled"><Shuffle :size="14" /> {{ shuffleEnabled ? 'Shuffled' : 'Shuffle' }}</button></div><article v-for="item in sets" :key="item.id" class="deck-card"><button class="deck-main" type="button" @click="openSet(item.id)"><span class="subject-tile large-tile" :class="`tile-${item.color}`"><BookOpen :size="21" /></span><span><strong>{{ item.title }}</strong><small>{{ item.cards.length }} flashcards <i></i> {{ item.cards.filter((card) => card.status === 'review').length }} to review</small></span><ChevronRight :size="17" /></button><div class="deck-footer"><span class="progress-track"><i :style="{ width: `${item.cards.filter((card) => card.status === 'known').length / Math.max(item.cards.length, 1) * 100}%` }"></i></span><small>{{ item.cards.filter((card) => card.status === 'known').length }} known</small><button class="button button-primary compact-button" type="button" @click="startStudy(item.id)"><Play :size="13" fill="currentColor" /> Study</button></div></article><div class="spaced-note"><Sparkles :size="16" /><span><strong>Review at the right time</strong><small>We’ll schedule the next review based on what you know.</small></span></div></section>
 
