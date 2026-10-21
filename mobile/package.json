@@ -10,15 +10,15 @@
   },
   "dependencies": {
     "@capacitor-community/sqlite": "^8.1.1",
-    "@capacitor/android": "^8.5.3",
-    "@capacitor/core": "^8.5.3",
+    "@capacitor/android": "9.0.0-alpha.8",
+    "@capacitor/core": "9.0.0-alpha.8",
     "@fontsource-variable/manrope": "^5.3.0",
     "jeep-sqlite": "^2.8.0",
     "lucide-vue-next": "^1.0.0",
     "vue": "^3.5.44"
   },
   "devDependencies": {
-    "@capacitor/cli": "^8.5.3",
+    "@capacitor/cli": "9.0.0-alpha.8",
     "@types/node": "^24.19.2",
     "@vitejs/plugin-vue": "^6.0.10",
     "@vue/tsconfig": "^0.9.1",
